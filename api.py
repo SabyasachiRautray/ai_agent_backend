@@ -6,12 +6,13 @@ conversation history, pending_booking, and current_booking in its own
 state (Redux) and sends them with every request; this backend just
 processes one turn and returns the updated state for the frontend to keep.
 
-pip install fastapi uvicorn python-multipart
+pip install fastapi uvicorn python-multipart pydub static-ffmpeg
 
 Run: uvicorn api:app --reload --port 8000
 """
 
 import os
+import io
 import base64
 import tempfile
 import asyncio
@@ -23,6 +24,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 import speech_recognition as sr
+from pydub import AudioSegment
+import static_ffmpeg
 import edge_tts
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
@@ -36,6 +39,11 @@ from booking import (
 
 load_dotenv()
 HF_TOKEN = os.getenv("HUGGINGFACEHUB_API_TOKEN")
+
+# pydub needs both ffmpeg (conversion) and ffprobe (reading format metadata).
+# static_ffmpeg bundles both binaries and adds them to PATH for this process,
+# so pydub finds them the normal way -- works identically locally and on Render.
+static_ffmpeg.add_paths()
 
 llm = ChatOpenAI(
     model="Qwen/Qwen2.5-7B-Instruct:together",
@@ -80,9 +88,11 @@ class ConverseResponse(BaseModel):
 # Helpers (mirrors gradio_app.py's logic, adapted for stateless HTTP)
 # ---------------------------------------------------------------------------
 def transcribe_audio_bytes(audio_bytes: bytes) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
+    # The browser's MediaRecorder sends webm/ogg (not WAV), so we transcode
+    # to real PCM WAV first -- speech_recognition only accepts WAV/AIFF/FLAC.
+    audio_segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    tmp_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    audio_segment.export(tmp_path, format="wav")
 
     try:
         recognizer = sr.Recognizer()
@@ -104,13 +114,16 @@ async def _synth(text: str, voice: str, out_path: str) -> None:
     await edge_tts.Communicate(text, voice).save(out_path)
 
 
-def synthesize_to_base64(text: str, lang: str) -> Optional[str]:
+async def synthesize_to_base64(text: str, lang: str) -> Optional[str]:
     if not text.strip():
         return None
     voice = VOICES.get(lang, VOICES["en"])
     out_path = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
     try:
-        asyncio.run(_synth(text, voice, out_path))
+        # We're already inside an event loop (converse() is async), so we
+        # await this directly instead of asyncio.run() -- which can't start
+        # a second loop inside one that's already running.
+        await _synth(text, voice, out_path)
         with open(out_path, "rb") as f:
             return base64.b64encode(f.read()).decode("utf-8")
     finally:
@@ -149,7 +162,7 @@ async def converse(
     if not query:
         reply_text = "Sorry, sir -- I didn't catch that. Could you repeat?"
         return ConverseResponse(
-            transcript="", reply_text=reply_text, audio_base64=synthesize_to_base64(reply_text, "en"),
+            transcript="", reply_text=reply_text, audio_base64=await synthesize_to_base64(reply_text, "en"),
             reply_lang="en", pending_booking=pending_booking, current_booking=current_booking,
             history=history,
         )
@@ -162,7 +175,7 @@ async def converse(
         reply_text = "Booking cancelled, sir."
         new_history = history + [ChatMessage(role="user", content=query), ChatMessage(role="assistant", content=reply_text)]
         return ConverseResponse(
-            transcript=query, reply_text=reply_text, audio_base64=synthesize_to_base64(reply_text, "en"),
+            transcript=query, reply_text=reply_text, audio_base64=await synthesize_to_base64(reply_text, "en"),
             reply_lang="en", pending_booking=False, current_booking=None, history=new_history,
         )
 
@@ -185,7 +198,7 @@ async def converse(
 
         new_history = history + [ChatMessage(role="user", content=query), ChatMessage(role="assistant", content=reply_text)]
         return ConverseResponse(
-            transcript=query, reply_text=reply_text, audio_base64=synthesize_to_base64(reply_text, "en"),
+            transcript=query, reply_text=reply_text, audio_base64=await synthesize_to_base64(reply_text, "en"),
             reply_lang="en", pending_booking=still_pending,
             current_booking=next_booking.model_dump() if next_booking else None, history=new_history,
         )
@@ -197,7 +210,7 @@ async def converse(
 
     new_history = history + [ChatMessage(role="user", content=query), ChatMessage(role="assistant", content=answer)]
     return ConverseResponse(
-        transcript=query, reply_text=answer, audio_base64=synthesize_to_base64(answer, actual_lang),
+        transcript=query, reply_text=answer, audio_base64=await synthesize_to_base64(answer, actual_lang),
         reply_lang=actual_lang, pending_booking=pending_booking, current_booking=current_booking, history=new_history,
     )
 
