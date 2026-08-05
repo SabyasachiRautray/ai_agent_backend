@@ -1,0 +1,233 @@
+# JARVIS -- KLIMS Hospital Voice Assistant
+## Setup & Deployment Guide
+
+A voice/chat assistant with RAG over a hospital knowledge base (Pinecone),
+Hindi/English support, appointment booking with email confirmation, and a
+React frontend talking to a FastAPI backend.
+
+---
+
+## 1. Prerequisites
+
+| Requirement | Version / Notes |
+|---|---|
+| Python | **3.11.5 -- required. Newer versions (3.13+) lack prebuilt wheels for `pyaudio` and other native deps used in this project. |
+| Node.js | 18+ (for the Vite/React frontend) |
+| Conda | Recommended for managing the Python environment cleanly |
+| Windows only | Confirm **Smart App Control** is **Off** (Settings -> Privacy & security -> Windows Security -> App & browser control). If On, it blocks native DLLs several dependencies need (`jiter`, `xxhash`, etc.) with cryptic `ImportError` messages. This is a one-way switch -- no re-enabling without a clean Windows reinstall. |
+
+Accounts/keys you'll need:
+- **Hugging Face** account + access token (for the LLM via HF Inference Providers, and for embeddings)
+- **Pinecone** account + API key (free tier) -- vector database for the hospital PDF
+- **Gmail** account with an **App Password** (not your normal password) -- for booking confirmation emails. Generate one at https://myaccount.google.com/apppasswords (requires 2-Step Verification enabled first)
+
+---
+
+## 2. Project structure
+
+```
+agent_backend/              # FastAPI backend + core logic
+  api.py                    # FastAPI app -- the one endpoint the frontend calls
+  rag.py                    # RAG chain (Pinecone retrieval + LLM)
+  booking.py                # Appointment extraction + Gmail confirmation
+  ingest_pdf.py              # One-time script: PDF -> chunks -> Pinecone
+  query_hospital.py          # CLI tool for testing retrieval without voice
+  jarvis_voice.py            # Terminal voice-mode helpers (STT/TTS/wake word)
+  main.py                    # Terminal voice-mode entry point (optional, not used by the web app)
+  gradio_app.py               # Gradio browser demo (optional alternative frontend)
+  .env                        # API keys (create this -- see section 3)
+
+jarvis-frontend/            # Vite + React (JS) + Tailwind + RTK Query
+  src/
+    main.jsx                 # Entry point -- wraps <App/> in Redux <Provider>
+    App.jsx                  # Landing <-> JarvisInterface toggle
+    store.js                  # Redux store
+    api/jarvisApi.js          # RTK Query slice -- calls the backend
+    pages/Landing.jsx
+    pages/JarvisInterface.jsx
+    utils/wavRecorder.js      # Browser mic -> real WAV (no ffmpeg needed)
+  .env                        # VITE_API_BASE_URL -- see section 3
+```
+
+---
+
+## 3. Environment variables
+
+### Backend `.env` (in `agent_backend/`)
+
+```
+HUGGINGFACEHUB_API_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxx
+PINECONE_API_KEY=pcsk_xxxxxxxxxxxxxxxxxxxxx
+GMAIL_ADDRESS=your.email@gmail.com
+GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
+PATIENT_NAME=Your Name
+PATIENT_EMAIL=your.email@example.com
+PYTHON_VERSION=3.11.5 // add this for render
+```
+
+- `PATIENT_NAME` / `PATIENT_EMAIL`: this is a personal single-user assistant, so these are fixed rather than asked for during booking.
+- `GMAIL_APP_PASSWORD` must be an **App Password**, not your regular Gmail password -- Google blocks plain SMTP login otherwise.
+
+### Frontend `.env` (in `jarvis-frontend/`, project root -- same level as `package.json`)
+
+```
+VITE_API_BASE_URL=http://localhost:8000
+```
+
+Change this to your deployed backend URL once hosted (see section 6).
+
+---
+
+## 4. Backend setup (local)
+
+```bash
+conda create -n jarvis python=3.11 -y
+conda activate jarvis
+cd agent_backend
+
+pip install -r requirement.txt
+```
+
+> If you're using the browser-based WAV recorder (`utils/wavRecorder.js`), you do **not** need `pydub` or `ffmpeg` -- the browser sends real WAV audio directly. Only install those if you're using `MediaRecorder`'s webm output instead.
+
+### Ingest the hospital PDF into Pinecone (one-time, or whenever the PDF changes)
+
+Edit the filename at the bottom of `ingest_pdf.py` to point at your PDF, then:
+
+```bash
+python ingest_pdf.py
+```
+
+This creates the Pinecone index, chunks the PDF, embeds each chunk via the Hugging Face Inference API, and uploads it. Re-running it automatically clears old vectors first.
+
+### (Optional) Sanity-check retrieval before wiring up voice
+
+```bash
+python query_hospital.py
+```
+
+### Run the backend
+
+```bash
+uvicorn api:app --reload --port 8000
+```
+
+Confirm it's alive: open `http://localhost:8000/api/health` -- should return `{"status": "ok"}`.
+
+---
+
+## 5. Frontend setup (local)
+
+```bash
+npm create vite@latest jarvis-frontend -- --template react
+cd jarvis-frontend
+npm install @reduxjs/toolkit react-redux
+npm install -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+```
+
+Drop in the project files (`main.jsx`, `App.jsx`, `store.js`, `api/jarvisApi.js`, `pages/Landing.jsx`, `pages/JarvisInterface.jsx`, `utils/wavRecorder.js`) matching the structure in section 2.
+
+Confirm `tailwind.config.js` includes:
+```js
+export default {
+  content: ["./index.html", "./src/**/*.{js,jsx}"],
+  theme: { extend: {} },
+  plugins: [],
+}
+```
+
+And `src/index.css` has:
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+```
+
+### Run the frontend
+
+```bash
+npm run dev
+```
+
+Open the printed local URL (usually `http://localhost:5173`). You should see the JARVIS landing page.
+
+---
+
+## 6. Deploying to Render
+
+Render hosts the backend and frontend as **two separate services** from the same (or separate) GitHub repo(s).
+
+### 6a. Backend -- Render Web Service
+
+1. Push `agent_backend/` to a GitHub repo Render can access.
+2. Render dashboard -> **New -> Web Service** -> connect the repo.
+3. **Root Directory**: `agent_backend` (if backend and frontend share one repo).
+4. **Runtime**: Python 3
+5. **Python version**: add a `runtime.txt` file in `agent_backend/` containing:
+   ```
+   python-3.11.9
+   ```
+6. **Build Command**:
+   ```
+   pip install -r requirements.txt
+   ```
+   (create a `requirements.txt` in `agent_backend/` listing everything from section 4's pip installs)
+7. **Start Command**:
+   ```
+   uvicorn api:app --host 0.0.0.0 --port $PORT
+   ```
+8. **Environment variables**: add all six from section 3's backend `.env` in Render's dashboard (Environment tab) -- do NOT commit `.env` to the repo.
+9. Deploy. Note the resulting URL (e.g. `https://jarvis-backend.onrender.com`).
+
+**Important**: in `api.py`, tighten CORS before going live:
+```python
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://your-frontend-url.onrender.com"],  # not "*"
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+### 6b. Frontend -- Render Static Site
+
+1. Push `jarvis-frontend/` to a repo (or a subfolder of the same repo).
+2. Render dashboard -> **New -> Static Site** -> connect the repo.
+3. **Root Directory**: `jarvis-frontend`
+4. **Build Command**:
+   ```
+   npm install && npm run build
+   ```
+5. **Publish Directory**:
+   ```
+   dist
+   ```
+6. **Environment variables**: add
+   ```
+   VITE_API_BASE_URL=https://jarvis-backend.onrender.com
+   ```
+   (your actual backend URL from step 6a)
+7. Deploy.
+
+### 6c. Post-deploy checklist
+
+- [ ] Visit the frontend URL -- landing page loads
+- [ ] Click "Activate JARVIS" -- interface loads
+- [ ] Grant mic permission when prompted, ask a test question -- transcription, RAG answer, and TTS playback all work
+- [ ] Test a booking flow end-to-end -- confirmation email actually arrives
+- [ ] Confirm CORS is locked to your actual frontend URL, not `*`
+- [ ] Confirm `.env` files are in `.gitignore` and were never committed
+
+---
+
+## 7. Common issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ImportError: DLL load failed ... Application Control policy` | Windows Smart App Control blocking a native dependency | Turn off Smart App Control (Settings -> Privacy & security -> Windows Security -> App & browser control) |
+| `model_not_supported` from HF router | Model needs an explicit provider suffix | Use `"Qwen/Qwen2.5-7B-Instruct:together"` (or check https://huggingface.co/settings/inference-providers for which providers are enabled) |
+| `402 depleted monthly credits` from HF | Free tier Inference Providers credits used up | Wait for monthly reset, buy pre-paid credits, or upgrade to HF PRO |
+| Pinecone `404 Resource not found` | Index name mismatch between `ingest_pdf.py` and `rag.py` | Ensure `INDEX_NAME` is identical in both files |
+| `wave.Error: file does not start with RIFF id` | Browser sent webm, backend tried to read it as WAV | Use the Web Audio API WAV recorder (`utils/wavRecorder.js`) instead of `MediaRecorder`, or convert server-side with `pydub` + ffmpeg |
+| Booking keeps re-asking for already-given details | Extraction failed to parse and wiped prior state | Already fixed in `booking.py` -- extraction merges into existing details rather than replacing them |
