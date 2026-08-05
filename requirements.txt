@@ -37,6 +37,7 @@ jaraco.classes==3.4.0
 jaraco.context==6.1.2
 jaraco.functools==4.6.0
 Jinja2==3.1.6
+playsound==1.2.2
 jiter==0.15.0
 jsonpatch==1.33
 jsonpointer==3.1.1
