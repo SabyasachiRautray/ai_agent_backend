@@ -1,19 +1,19 @@
 """
 Appointment booking: extracts booking details from the conversation using
-the LLM, asks for anything missing, and emails a confirmation via Gmail
-SMTP once complete.
+the LLM, asks for anything missing, and emails a confirmation via Resend
+(HTTPS email API) once complete.
 
-Needs GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env -- an App Password
-(not your regular Gmail password), generated at
-https://myaccount.google.com/apppasswords (requires 2-Step Verification).
+Needs RESEND_API_KEY in .env -- get one free at https://resend.com.
+Render's free tier blocks outbound SMTP (ports 25/465/587), so this uses
+Resend's HTTPS API instead of smtplib -- works identically locally and
+on Render without any platform upgrade.
 """
 
 import os
 import re
-import smtplib
-from email.mime.text import MIMEText
 from typing import Optional
 
+import requests
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -21,8 +21,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 load_dotenv()
 
-GMAIL_ADDRESS = os.getenv("GMAIL_ADDRESS")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
 # This is a personal assistant for one fixed user -- no need to ask for
 # name/email on every booking. Set these once in .env.
@@ -142,9 +141,12 @@ def extract_appointment_details(
 
 
 def send_confirmation_email(details: AppointmentDetails) -> bool:
-    """Sends a booking confirmation email via Gmail SMTP. Returns True on success."""
-    if not GMAIL_ADDRESS or not GMAIL_APP_PASSWORD:
-        print("Gmail credentials missing in .env -- cannot send confirmation email.")
+    """Sends a booking confirmation email via Resend's HTTPS API. Returns
+    True on success. Uses HTTPS instead of SMTP because Render's free tier
+    blocks outbound traffic to SMTP ports (25/465/587) -- this works the
+    same locally and on Render without needing a paid instance."""
+    if not RESEND_API_KEY:
+        print("RESEND_API_KEY missing in .env -- cannot send confirmation email.")
         return False
 
     body = (
@@ -156,16 +158,20 @@ def send_confirmation_email(details: AppointmentDetails) -> bool:
         f"Please arrive 20 minutes early with a valid photo ID.\n\n"
         f"-- KLIMS JARVIS Assistant"
     )
-    msg = MIMEText(body)
-    msg["Subject"] = "KLIMS Appointment Confirmation"
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = details.patient_email
 
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
+        resp = requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+            json={
+                "from": "JARVIS <onboarding@resend.dev>",
+                "to": [details.patient_email],
+                "subject": "KLIMS Appointment Confirmation",
+                "text": body,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
         return True
     except Exception as e:
         print(f"Failed to send confirmation email: {e}")

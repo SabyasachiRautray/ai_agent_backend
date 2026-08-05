@@ -11,7 +11,7 @@ React frontend talking to a FastAPI backend.
 
 | Requirement | Version / Notes |
 |---|---|
-| Python | **3.11.5 -- required. Newer versions (3.13+) lack prebuilt wheels for `pyaudio` and other native deps used in this project. |
+| Python | **3.11.15 -- required. Newer versions (3.13+) lack prebuilt wheels for `pyaudio` and other native deps used in this project. |
 | Node.js | 18+ (for the Vite/React frontend) |
 | Conda | Recommended for managing the Python environment cleanly |
 | Windows only | Confirm **Smart App Control** is **Off** (Settings -> Privacy & security -> Windows Security -> App & browser control). If On, it blocks native DLLs several dependencies need (`jiter`, `xxhash`, etc.) with cryptic `ImportError` messages. This is a one-way switch -- no re-enabling without a clean Windows reinstall. |
@@ -62,7 +62,7 @@ GMAIL_ADDRESS=your.email@gmail.com
 GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 PATIENT_NAME=Your Name
 PATIENT_EMAIL=your.email@example.com
-PYTHON_VERSION=3.11.5 // add this for render
+PYTHON_VERSION=3.11.15 // add this for render
 ```
 
 - `PATIENT_NAME` / `PATIENT_EMAIL`: this is a personal single-user assistant, so these are fixed rather than asked for during booking.
